@@ -284,11 +284,19 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
       events.push({ lane: lane.key, action: "pull-failed", detail: `${lane.machine} unreachable this tick` });
       continue;
     }
+    let text: string | null;
     try {
-      events.push(...(await pullRemoteReports(d, lane)));
+      text = await d.machine(lane.machine).readFile(remoteReportPath(lane.key));
     } catch (e) {
       unreachable.add(lane.machine);
       events.push({ lane: lane.key, action: "pull-failed", detail: failureDetail(e) });
+      continue;
+    }
+    try {
+      events.push(...(await applyRemoteReports(d, lane.key, text)));
+    } catch (e) {
+      // a failure on this side (the lead's pane, the lane's own pane) is this lane's, never its PC's
+      events.push({ lane: lane.key, action: "apply-failed", detail: failureDetail(e) });
     }
   }
   const skipped = (paneId: string): boolean => unreachable.has(splitPane(paneId)?.machine ?? "");
@@ -359,30 +367,33 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
 /**
  * Applies the entries a remote lane appended to its report file since the last pull, through the same
  * report/ready a local lane's dori calls. A READY without evidence is consumed and sent back to the lane,
- * so it is not refused again on every tick. An entry is counted only once it was applied: a failure in
- * between applies it again on the next tick rather than never.
+ * so it is not refused again on every tick. An entry counts as applied once it is in the lane's record,
+ * even when telling the lead failed after that: the lead is told through the record, never twice.
  */
-export async function pullRemoteReports(d: Deps, lane: Lane): Promise<DutyEvent[]> {
-  const text = await d.machine(lane.machine!).readFile(remoteReportPath(lane.key));
+export async function applyRemoteReports(d: Deps, key: string, text: string | null): Promise<DutyEvent[]> {
   if (text === null) return [];
-  const fresh = parseRemoteReports(text).slice(lane.remoteEntries ?? 0);
   const events: DutyEvent[] = [];
-  for (const entry of fresh) {
-    const current = d.store.lane(lane.key)!;
-    if (current.status !== "working" && current.status !== "waiting") break;
-    if (entry.kind === "report") {
-      await report(d, lane.key, entry.text, entry.status);
-      events.push({ lane: lane.key, action: "remote-report" });
-    } else if (entry.evidence.length === 0 || !entry.text) {
-      await send(d, lane.key, `Your READY in ${remoteReportPath(lane.key)} was not accepted: it needs the final answer text and at least one "evidence: <link>" line. Append a new READY entry.`, "duty");
-      events.push({ lane: lane.key, action: "remote-ready-refused" });
-    } else {
-      await ready(d, lane.key, entry.text, entry.evidence);
-      events.push({ lane: lane.key, action: "remote-ready" });
+  for (const entry of parseRemoteReports(text).slice(d.store.lane(key)!.remoteEntries ?? 0)) {
+    const before = d.store.lane(key)!;
+    if (before.status !== "working" && before.status !== "waiting") break;
+    const count = () => {
+      const lane = d.store.lane(key)!;
+      lane.remoteEntries = (lane.remoteEntries ?? 0) + 1;
+      d.store.saveLane(lane);
+    };
+    if (entry.kind === "ready" && (entry.evidence.length === 0 || !entry.text)) {
+      count();
+      events.push({ lane: key, action: "remote-ready-refused" });
+      await send(d, key, `Your READY in ${remoteReportPath(key)} was not accepted: it needs the final answer text and at least one "evidence: <link>" line. Append a new READY entry.`, "duty");
+      continue;
     }
-    const applied = d.store.lane(lane.key)!;
-    applied.remoteEntries = (applied.remoteEntries ?? 0) + 1;
-    d.store.saveLane(applied);
+    try {
+      if (entry.kind === "report") await report(d, key, entry.text, entry.status);
+      else await ready(d, key, entry.text, entry.evidence);
+    } finally {
+      if (d.store.lane(key)!.log.length > before.log.length) count();
+    }
+    events.push({ lane: key, action: entry.kind === "report" ? "remote-report" : "remote-ready" });
   }
   return events;
 }

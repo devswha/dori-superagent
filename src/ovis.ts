@@ -2,7 +2,7 @@
 // Only routes Ovis already offers are used: workspace/tab create, session, pane input/keys/read/close
 // and fs/file. See docs/remote-lanes.md.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentStatus, PaneRef } from "./herdr.ts";
 
@@ -27,6 +27,9 @@ export function splitPane(id: string): { machine: string; pane: string } | null 
 export function loadMachines(root: string): Record<string, MachineConfig> {
   const path = join(root, "machines.json");
   if (!existsSync(path)) return {};
+  if (process.platform !== "win32" && (statSync(path).mode & 0o077) !== 0) {
+    process.stderr.write(`dori: ${path} holds Ovis credentials and is readable by others; run chmod 600 on it\n`);
+  }
   const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   const out: Record<string, MachineConfig> = {};
   for (const [name, v] of Object.entries(raw)) {
@@ -197,7 +200,8 @@ export type RemoteEntry = { kind: "report"; status?: "working" | "waiting"; text
 /**
  * Complete entries of a remote lane's report file: each starts with a `## REPORT`, `## REPORT waiting|working`
  * or `## READY` line and ends at a `## END` line; a READY entry names its evidence on `evidence: <link>` lines.
- * An entry still being written (no `## END` yet) is left for the next read. Text outside entries is ignored.
+ * An entry still being written (no `## END` yet) is left for the next read; a heading inside an open entry
+ * is part of its text. Text outside entries is ignored.
  */
 export function parseRemoteReports(text: string): RemoteEntry[] {
   const entries: RemoteEntry[] = [];
@@ -216,7 +220,7 @@ export function parseRemoteReports(text: string): RemoteEntry[] {
   };
   for (const line of text.split("\n")) {
     const m = /^## (REPORT|READY)(?: (working|waiting))?\s*$/.exec(line.trimEnd());
-    if (m && !(m[1] === "READY" && m[2])) {
+    if (m && !(m[1] === "READY" && m[2]) && !head) {
       head = m;
       body = [];
     } else if (head && line.trimEnd() === "## END") {

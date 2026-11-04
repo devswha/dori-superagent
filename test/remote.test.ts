@@ -154,6 +154,36 @@ describe("remote lanes (--machine)", () => {
     expect(pane.received[0]).not.toContain("dori ready");
   });
 
+  test("a failure on this side never marks the PC unreachable: a gone lane is LOST, the other lane still gets its READY", async () => {
+    const { w, d, brief } = setup();
+    const gone = await startLane(d, "gone", brief, { machine: "pc" });
+    await startLane(d, "fine", brief, { machine: "pc" });
+    w.remoteFiles.set("~/.dori-lanes/gone.md", "## READY\nno proof\n## END\n");
+    w.remoteFiles.set("~/.dori-lanes/fine.md", "## READY\nok\nevidence: https://e/1\n## END\n");
+    w.remote.delete(gone.paneId.slice("pc@".length));
+    const events = (await dutyTick(d)).map((e) => `${e.lane}:${e.action}`);
+    expect(events).toContain("gone:apply-failed");
+    expect(events).toContain("fine:remote-ready");
+    expect(events).toContain("gone:lost");
+    expect(d.store.lane("gone")!.status).toBe("lost");
+    expect(d.store.lane("fine")!.status).toBe("ready");
+    await dutyTick(d);
+    expect(d.store.queued(gone.paneId)).toHaveLength(1);
+  });
+
+  test("a lead pane that is gone neither duplicates a report nor holds back another lane's READY", async () => {
+    const { w, d, brief } = setup();
+    await startLane(d, "aa", brief, { machine: "pc" });
+    await startLane(d, "bb", brief, { machine: "pc" });
+    w.panes.delete("w1:p1");
+    w.remoteFiles.set("~/.dori-lanes/aa.md", "## REPORT\nhalfway\n## END\n");
+    w.remoteFiles.set("~/.dori-lanes/bb.md", "## READY\nok\nevidence: https://e/1\n## END\n");
+    await dutyTick(d);
+    await dutyTick(d);
+    expect(d.store.lane("aa")!.log.filter((l) => l.kind === "report")).toHaveLength(1);
+    expect(d.store.lane("bb")!.status).toBe("ready");
+  });
+
   test("dori start --machine goes through the CLI", async () => {
     const { w, d, brief } = setup();
     expect(await main(["start", "cli-lane", "--brief", brief, "--machine", "pc", "--cwd", "/srv/x"], d)).toBe(0);
@@ -170,6 +200,9 @@ describe("report file and machines.json", () => {
       { kind: "ready", text: "ok\n## READY waiting\nx", evidence: ["a", "b"] },
     ]);
     expect(parseRemoteReports("")).toEqual([]);
+    expect(parseRemoteReports("## REPORT\nnote\n## READY\nfinal\nevidence: https://e/1\n## END\n")).toEqual([
+      { kind: "report", text: "note\n## READY\nfinal\nevidence: https://e/1" },
+    ]);
   });
 
   test("machines.json is checked: a name, an http(s) URL and a credential", () => {
