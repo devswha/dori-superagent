@@ -42,10 +42,14 @@ Add the PC to `$DORI_HOME/machines.json` (keep it private, mode `0600`):
   `/api/pane/keys`; the omo idle-screen check reads `GET /api/pane/read`; `done` calls `/api/pane/close`.
   A PC that cannot be reached is a failed read (`lane-failed`), never a lost lane.
 - That PC has no dori, so the lane reports by appending `## REPORT`, `## REPORT waiting` and `## READY`
-  entries (READY with `evidence: <link>` lines) to `~/.dori-lanes/<key>.md` on its own PC. Each duty
-  tick reads that file with `GET /api/fs/file` and applies the entries it has not applied yet through
-  the usual report and ready, so the lead hears about it as from a local lane. A READY without
-  evidence is sent back to the lane.
+  entries (READY with `evidence: <link>` lines), each closed by a `## END` line, to
+  `~/.dori-lanes/<key>.md` on its own PC. `start` empties that file, so a former lane of the same key
+  never reports into the new one. Each duty tick reads it with `GET /api/fs/file` and applies the
+  closed entries it has not applied yet through the usual report and ready, so the lead hears about
+  it as from a local lane; an entry is counted only after it was applied. A READY without evidence is
+  sent back to the lane, and an idle remote lane is nudged to its report file.
+- A PC whose file read fails is skipped for the rest of that tick: its lanes are neither marked lost
+  nor each made to wait out the request timeout.
 - Reviews and merges stay with the lead: the lane names its PR in a REPORT.
 
 Every request carries `x-herdr-machine: 1` and no `Origin`, which is how Ovis admits a non-browser

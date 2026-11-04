@@ -275,15 +275,25 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
   const stop = d.store.stop("duty");
   if (stop) return [{ action: "stopped", detail: stop.reason }];
   const events: DutyEvent[] = [];
+  // A PC whose report file could not be read this tick is not asked again until the next one: its lanes are
+  // neither declared lost (a READY may still sit in that file) nor each made to wait out the request timeout.
+  const unreachable = new Set<string>();
   for (const lane of d.store.lanes()) {
     if (!lane.machine || (lane.status !== "working" && lane.status !== "waiting")) continue;
+    if (unreachable.has(lane.machine)) {
+      events.push({ lane: lane.key, action: "pull-failed", detail: `${lane.machine} unreachable this tick` });
+      continue;
+    }
     try {
       events.push(...(await pullRemoteReports(d, lane)));
     } catch (e) {
+      unreachable.add(lane.machine);
       events.push({ lane: lane.key, action: "pull-failed", detail: failureDetail(e) });
     }
   }
+  const skipped = (paneId: string): boolean => unreachable.has(splitPane(paneId)?.machine ?? "");
   for (const paneId of d.store.inboxPanes()) {
+    if (skipped(paneId)) continue;
     try {
       if (await flushInbox(d, paneId)) events.push({ pane: paneId, action: "flushed" });
     } catch (e) {
@@ -294,6 +304,10 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
   }
   for (const lane of d.store.lanes()) {
     if (lane.status !== "working" && lane.status !== "waiting") continue;
+    if (skipped(lane.paneId)) {
+      events.push({ lane: lane.key, action: "lane-failed", detail: `${lane.machine} unreachable this tick` });
+      continue;
+    }
     try {
       const st = await paneStatus(d, lane.paneId);
       const now = d.now();
@@ -318,7 +332,8 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
       lane.log.push({ at: now, kind: "nudge", text: `idle ${Math.floor(idleMin)} min` });
       d.store.saveLane(lane);
       if (lane.nudges < NUDGE_MINUTES.length) {
-        await send(d, lane.key, prompt("nudge.md", { key: lane.key, minutes: String(Math.floor(idleMin)), dori: d.doriCmd }), "duty");
+        const vars = { key: lane.key, minutes: String(Math.floor(idleMin)), dori: d.doriCmd, reports: remoteReportPath(lane.key) };
+        await send(d, lane.key, prompt(lane.machine ? "nudge-remote.md" : "nudge.md", vars), "duty");
         events.push({ lane: lane.key, action: `nudge-${lane.nudges}` });
       } else {
         await tellLead(d, `[ESCALATE ${lane.key}] idle ${Math.floor(idleMin)} min with no READY after ${lane.nudges - 1} nudges`, "duty");
@@ -344,7 +359,8 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
 /**
  * Applies the entries a remote lane appended to its report file since the last pull, through the same
  * report/ready a local lane's dori calls. A READY without evidence is consumed and sent back to the lane,
- * so it is not refused again on every tick.
+ * so it is not refused again on every tick. An entry is counted only once it was applied: a failure in
+ * between applies it again on the next tick rather than never.
  */
 export async function pullRemoteReports(d: Deps, lane: Lane): Promise<DutyEvent[]> {
   const text = await d.machine(lane.machine!).readFile(remoteReportPath(lane.key));
@@ -354,8 +370,6 @@ export async function pullRemoteReports(d: Deps, lane: Lane): Promise<DutyEvent[
   for (const entry of fresh) {
     const current = d.store.lane(lane.key)!;
     if (current.status !== "working" && current.status !== "waiting") break;
-    current.remoteEntries = (current.remoteEntries ?? 0) + 1;
-    d.store.saveLane(current);
     if (entry.kind === "report") {
       await report(d, lane.key, entry.text, entry.status);
       events.push({ lane: lane.key, action: "remote-report" });
@@ -366,6 +380,9 @@ export async function pullRemoteReports(d: Deps, lane: Lane): Promise<DutyEvent[
       await ready(d, lane.key, entry.text, entry.evidence);
       events.push({ lane: lane.key, action: "remote-ready" });
     }
+    const applied = d.store.lane(lane.key)!;
+    applied.remoteEntries = (applied.remoteEntries ?? 0) + 1;
+    d.store.saveLane(applied);
   }
   return events;
 }

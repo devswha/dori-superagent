@@ -29,7 +29,7 @@ describe("remote lanes (--machine)", () => {
     expect(pane.ran).toEqual(typed.map(() => "Enter"));
     expect(typed.length).toBeGreaterThan(3);
     for (const line of typed) expect(line.length < 1100 && !line.includes("\n")).toBe(true);
-    expect(typed[0]).toBe(`mkdir -p "$HOME/.dori-lanes" && : > "$HOME/.dori-lanes/fix-login.brief.md.b64"`);
+    expect(typed[0]).toBe(`mkdir -p "$HOME/.dori-lanes" && : > "$HOME/.dori-lanes/fix-login.brief.md.b64" && : > "$HOME/.dori-lanes/fix-login.md"`);
     expect(typed.at(-1)).toBe(`base64 -d < "$HOME/.dori-lanes/fix-login.brief.md.b64" > "$HOME/.dori-lanes/fix-login.brief.md" && rm -f "$HOME/.dori-lanes/fix-login.brief.md.b64" && DORI_LANE=fix-login omo 'Read your brief at ~/.dori-lanes/fix-login.brief.md and execute it. Your lane key is fix-login.'`);
     const chunks = typed.slice(1, -1).map((l) => /^printf %s ([A-Za-z0-9+/=]+) >> "\$HOME\/\.dori-lanes\/fix-login\.brief\.md\.b64"$/.exec(l)![1]!);
     const sent = Buffer.from(chunks.join(""), "base64").toString();
@@ -77,14 +77,16 @@ describe("remote lanes (--machine)", () => {
     const { w, d, lead, brief } = setup();
     const lane = await startLane(d, "fix-login", brief, { machine: "pc" });
     const file = "~/.dori-lanes/fix-login.md";
-    w.remoteFiles.set(file, "## REPORT\ntests green\n");
+    w.remoteFiles.set(file, "## REPORT\ntests green\n## END\n");
     await dutyTick(d);
-    w.remoteFiles.set(file, "## REPORT\ntests green\n## REPORT waiting\nCI running\n");
+    w.remoteFiles.set(file, "## REPORT\ntests green\n## END\n## REPORT waiting\nCI running\n## END\n");
     await dutyTick(d);
     expect(lead.received.slice(1)).toEqual(["[REPORT fix-login] tests green", "[REPORT fix-login WAITING] CI running"]);
     expect(d.store.lane("fix-login")!.status).toBe("waiting");
 
-    w.remoteFiles.set(file, `${w.remoteFiles.get(file)}## READY\nall done\nevidence: https://github.com/o/r/pull/1\n`);
+    w.remoteFiles.set(file, `${w.remoteFiles.get(file)}## READY\nall done\n`);
+    expect(await dutyTick(d)).toEqual([]);
+    w.remoteFiles.set(file, `${w.remoteFiles.get(file)}evidence: https://github.com/o/r/pull/1\n## END\n`);
     await dutyTick(d);
     await dutyTick(d);
     expect(lead.received.at(-1)).toBe("[READY fix-login] all done\nevidence: https://github.com/o/r/pull/1");
@@ -98,7 +100,7 @@ describe("remote lanes (--machine)", () => {
     const { w, d, brief } = setup();
     const lane = await startLane(d, "fix-login", brief, { machine: "pc" });
     const pane = w.remote.get(lane.paneId.slice("pc@".length))!;
-    w.remoteFiles.set("~/.dori-lanes/fix-login.md", "## READY\ndone, trust me\n");
+    w.remoteFiles.set("~/.dori-lanes/fix-login.md", "## READY\ndone, trust me\n## END\n");
     pane.received.length = 0;
     expect(await dutyTick(d)).toContainEqual({ lane: "fix-login", action: "remote-ready-refused" });
     expect(pane.received).toHaveLength(1);
@@ -113,10 +115,43 @@ describe("remote lanes (--machine)", () => {
   test("an unreachable PC is a failed read, never a lost lane", async () => {
     const { w, d, brief } = setup();
     await startLane(d, "fix-login", brief, { machine: "pc" });
+    await startLane(d, "second", brief, { machine: "pc" });
     w.remoteDown = true;
     const events = await dutyTick(d);
-    expect(events.map((e) => e.action)).toEqual(["pull-failed", "lane-failed"]);
+    expect(events.map((e) => e.action)).toEqual(["pull-failed", "pull-failed", "lane-failed", "lane-failed"]);
+    expect(events[1]!.detail).toBe("pc unreachable this tick");
     expect(d.store.lane("fix-login")!.status).toBe("working");
+    expect(d.store.lane("second")!.status).toBe("working");
+  });
+
+  test("a lane reopened under the same key never gets the former lane's READY again", async () => {
+    const { w, d, lead, brief } = setup();
+    await startLane(d, "again", brief, { machine: "pc" });
+    w.remoteFiles.set("~/.dori-lanes/again.md", "## READY\nold answer\nevidence: https://x/1\n## END\n");
+    await dutyTick(d);
+    await done(d, "again");
+    await startLane(d, "again", brief, { machine: "pc" });
+    expect(await dutyTick(d)).toEqual([]);
+    expect(d.store.lane("again")!.status).toBe("working");
+    expect(lead.received.filter((m) => m.startsWith("[READY again]"))).toHaveLength(1);
+  });
+
+  test("a pane that closes before its agent comes up is a failed start, not a lane", async () => {
+    const { w, d, brief } = setup();
+    w.remoteVanishes = true;
+    await expect(startLane(d, "vanish", brief, { machine: "pc" })).rejects.toThrow("closed before an agent came up");
+    expect(d.store.lane("vanish")).toBeUndefined();
+  });
+
+  test("an idle remote lane is nudged to its report file, never to a dori command it does not have", async () => {
+    const { w, d, brief } = setup();
+    const lane = await startLane(d, "quiet", brief, { machine: "pc" });
+    const pane = w.remote.get(lane.paneId.slice("pc@".length))!;
+    pane.received.length = 0;
+    w.clock += 11 * 60_000;
+    expect(await dutyTick(d)).toContainEqual({ lane: "quiet", action: "nudge-1" });
+    expect(pane.received[0]).toContain("~/.dori-lanes/quiet.md");
+    expect(pane.received[0]).not.toContain("dori ready");
   });
 
   test("dori start --machine goes through the CLI", async () => {
@@ -128,8 +163,8 @@ describe("remote lanes (--machine)", () => {
 });
 
 describe("report file and machines.json", () => {
-  test("entries start at their heading; evidence lines are taken out of a READY's text", () => {
-    expect(parseRemoteReports("notes\n## REPORT\nfirst\n\n## REPORT waiting\nblocked\n## READY\nok\nevidence: a\nEvidence:  b \n## READY waiting\nx")).toEqual([
+  test("entries run from their heading to ## END, an unfinished one is left for later; evidence lines are taken out of a READY's text", () => {
+    expect(parseRemoteReports("notes\n## REPORT\nfirst\n\n## END\nstray\n## REPORT waiting\nblocked\n## END\n## READY\nok\nevidence: a\nEvidence:  b \n## READY waiting\nx\n## END\n## REPORT\nstill being writ")).toEqual([
       { kind: "report", text: "first" },
       { kind: "report", status: "waiting", text: "blocked" },
       { kind: "ready", text: "ok\n## READY waiting\nx", evidence: ["a", "b"] },

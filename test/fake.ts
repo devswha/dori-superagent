@@ -38,6 +38,8 @@ export class World {
   ovisCalls: { method: string; path: string; headers: Record<string, string>; body?: Record<string, unknown> }[] = [];
   /** set: the command typed into a created pane brings up no agent */
   remoteAgentFails = false;
+  /** set: a created pane closes as soon as it is typed into */
+  remoteVanishes = false;
   /** set: the PC cannot be reached at all */
   remoteDown = false;
 
@@ -66,6 +68,9 @@ export class World {
     if (path === "pane/input") { pane.received.push(String(body!.text)); return json({ ok: true }); }
     if (path === "pane/keys") {
       pane.ran.push((body!.keys as string[]).join(" "));
+      const truncated = /: > "\$HOME\/\.dori-lanes\/([a-z0-9-]+)\.md"/.exec(pane.received.at(-1) ?? "");
+      if (truncated) this.remoteFiles.set(`~/.dori-lanes/${truncated[1]}.md`, "");
+      if (this.remoteVanishes && pane.received.at(-1)?.includes("Read your brief")) this.remote.delete(id);
       if (pane.status === "shell" && !this.remoteAgentFails && pane.received.at(-1)?.includes(" omo ")) pane.status = "idle";
       return json({ ok: true });
     }

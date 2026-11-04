@@ -109,7 +109,8 @@ export class Ovis {
     try {
       for (const line of opts.commandLines) await this.deliver(paneId, line, "shell");
       const deadline = Date.now() + this.timing.agentTimeoutMs;
-      while ((await this.status(paneId)) === "shell") {
+      for (let st = await this.status(paneId); st === "shell" || st === "gone"; st = await this.status(paneId)) {
+        if (st === "gone") throw new Error(`ovis ${this.name}: ${paneId} closed before an agent came up`);
         if (Date.now() >= deadline) throw new Error(`ovis ${this.name}: no agent came up in ${paneId} within ${this.timing.agentTimeoutMs / 1000}s`);
         await Bun.sleep(this.timing.agentEveryMs);
       }
@@ -132,7 +133,8 @@ export class Ovis {
 
   /** Types the message as one line and presses Enter, as the local fallback does; only the Enter is retried. */
   async deliver(paneId: string, text: string, kind: AgentStatus): Promise<void> {
-    const line = kind === "shell" ? text : text.trim().replace(/\s*\n\s*/g, " / ");
+    // one line whatever the pane runs: a line break typed into a shell would run each line
+    const line = text.trim().replace(/\s*\n\s*/g, " / ");
     await this.json("POST", "pane/input", { pane_id: paneId, text: line });
     await Bun.sleep(this.timing.settleMs);
     for (let attempt = 1; ; attempt++) {
@@ -182,7 +184,9 @@ export function remoteKickoff(key: string, brief: string, agentCmd: string, shq:
   const b64 = `${file}.b64`;
   const data = Buffer.from(brief).toString("base64");
   const kickoff = `Read your brief at ${remoteBriefPath(key)} and execute it. Your lane key is ${key}.`;
-  const lines = [`mkdir -p "$HOME/.dori-lanes" && : > "${b64}"`];
+  // the report file starts empty, so a READY a former lane of the same key left there is never applied again
+  const reports = remoteReportPath(key).replace(/^~\//, "$HOME/");
+  const lines = [`mkdir -p "$HOME/.dori-lanes" && : > "${b64}" && : > "${reports}"`];
   for (let at = 0; at < data.length; at += KICKOFF_CHUNK) lines.push(`printf %s ${data.slice(at, at + KICKOFF_CHUNK)} >> "${b64}"`);
   lines.push(`base64 -d < "${b64}" > "${file}" && rm -f "${b64}" && DORI_LANE=${key} ${agentCmd} ${shq(kickoff)}`);
   return lines;
@@ -191,9 +195,9 @@ export function remoteKickoff(key: string, brief: string, agentCmd: string, shq:
 export type RemoteEntry = { kind: "report"; status?: "working" | "waiting"; text: string } | { kind: "ready"; text: string; evidence: string[] };
 
 /**
- * Entries of a remote lane's report file: each starts with a `## REPORT`, `## REPORT waiting|working` or
- * `## READY` line; a READY entry names its evidence on `evidence: <link>` lines. Text before the first
- * heading and unknown headings are ignored.
+ * Complete entries of a remote lane's report file: each starts with a `## REPORT`, `## REPORT waiting|working`
+ * or `## READY` line and ends at a `## END` line; a READY entry names its evidence on `evidence: <link>` lines.
+ * An entry still being written (no `## END` yet) is left for the next read. Text outside entries is ignored.
  */
 export function parseRemoteReports(text: string): RemoteEntry[] {
   const entries: RemoteEntry[] = [];
@@ -213,13 +217,14 @@ export function parseRemoteReports(text: string): RemoteEntry[] {
   for (const line of text.split("\n")) {
     const m = /^## (REPORT|READY)(?: (working|waiting))?\s*$/.exec(line.trimEnd());
     if (m && !(m[1] === "READY" && m[2])) {
-      flush();
       head = m;
       body = [];
+    } else if (head && line.trimEnd() === "## END") {
+      flush();
+      head = null;
     } else if (head) {
       body.push(line);
     }
   }
-  flush();
   return entries;
 }
