@@ -154,7 +154,7 @@ describe("remote lanes (--machine)", () => {
     expect(pane.received[0]).not.toContain("dori ready");
   });
 
-  test("a failure on this side never marks the PC unreachable: a gone lane is LOST, the other lane still gets its READY", async () => {
+  test("a failure on this side never marks the PC unreachable: the other lane gets its READY, the gone lane is LOST a tick later", async () => {
     const { w, d, brief } = setup();
     const gone = await startLane(d, "gone", brief, { machine: "pc" });
     await startLane(d, "fine", brief, { machine: "pc" });
@@ -164,10 +164,10 @@ describe("remote lanes (--machine)", () => {
     const events = (await dutyTick(d)).map((e) => `${e.lane}:${e.action}`);
     expect(events).toContain("gone:apply-failed");
     expect(events).toContain("fine:remote-ready");
-    expect(events).toContain("gone:lost");
-    expect(d.store.lane("gone")!.status).toBe("lost");
+    expect(events).not.toContain("gone:lost");
     expect(d.store.lane("fine")!.status).toBe("ready");
-    await dutyTick(d);
+    expect((await dutyTick(d)).map((e) => `${e.lane}:${e.action}`)).toContain("gone:lost");
+    expect(d.store.lane("gone")!.status).toBe("lost");
     expect(d.store.queued(gone.paneId)).toHaveLength(1);
   });
 
@@ -182,6 +182,32 @@ describe("remote lanes (--machine)", () => {
     await dutyTick(d);
     expect(d.store.lane("aa")!.log.filter((l) => l.kind === "report")).toHaveLength(1);
     expect(d.store.lane("bb")!.status).toBe("ready");
+  });
+
+  test("two duty passes at once apply an entry once and never skip the READY after it", async () => {
+    const { w, d, lead, brief } = setup();
+    await startLane(d, "twice", brief, { machine: "pc" });
+    w.remoteFiles.set("~/.dori-lanes/twice.md", "## REPORT\nhalfway\n## END\n");
+    await Promise.all([dutyTick(d), dutyTick(d)]);
+    expect(d.store.lane("twice")!.remoteEntries).toBe(1);
+    w.remoteFiles.set("~/.dori-lanes/twice.md", "## REPORT\nhalfway\n## END\n## READY\nok\nevidence: https://e/1\n## END\n");
+    await dutyTick(d);
+    expect(d.store.lane("twice")!.status).toBe("ready");
+    expect(lead.received.filter((m) => m.startsWith("[READY twice]"))).toHaveLength(1);
+  });
+
+  test("a READY written just before the pane closed is applied, not lost; a lane whose entries failed is not called lost", async () => {
+    const { w, d, brief } = setup();
+    const late = await startLane(d, "late", brief, { machine: "pc" });
+    w.remote.delete(late.paneId.slice("pc@".length));
+    const read = w.ovisFetch;
+    let reads = 0;
+    w.ovisFetch = async (url, init) => {
+      if (url.includes("fs/file") && ++reads === 2) w.remoteFiles.set("~/.dori-lanes/late.md", "## READY\nok\nevidence: https://e/1\n## END\n");
+      return read(url, init);
+    };
+    expect((await dutyTick(d)).map((e) => e.action)).toContain("remote-ready");
+    expect(d.store.lane("late")!.status).toBe("ready");
   });
 
   test("dori start --machine goes through the CLI", async () => {
@@ -217,5 +243,9 @@ describe("report file and machines.json", () => {
     expect(() => loadMachines(d.store.root)).toThrow("http(s) URL");
     write({ pc: { url: "http://x" } });
     expect(() => loadMachines(d.store.root)).toThrow("token");
+    write({ pc: { url: "http://x", token: "t", agent: "claude; rm -rf ~" } });
+    expect(() => loadMachines(d.store.root)).toThrow("plain command line");
+    write({ pc: { url: "http://x", token: "t", agent: "claude --model opus" } });
+    expect(loadMachines(d.store.root)["pc"]!.agent).toBe("claude --model opus");
   });
 });

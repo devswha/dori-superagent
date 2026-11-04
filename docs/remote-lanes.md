@@ -22,6 +22,8 @@ Add the PC to `$DORI_HOME/machines.json` (keep it private, mode `0600`):
   `curl -si -X POST <url>/api/devices/pair -H 'content-type: application/json' -d '{"code":"<code>","label":"dori"}'`
   and keep the value of the `ovis_device` cookie it sets. It can be revoked from the device list.
   `token` is the Ovis token instead, sent as `Authorization: Bearer`.
+- `agent` (optional) is the command a lane runs on that PC (for example `claude`), when it differs from
+  this PC's `DORI_AGENT_CMD`. Letters, digits, spaces and `_./=-` only.
 - The end-to-end encrypted relay is not used: dori has no client for it, so the PC must be reachable
   over Tailscale or through a local Ovis.
 

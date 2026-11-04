@@ -174,7 +174,7 @@ export async function startLane(
     const brief = `${briefText}\n\n${footer}`;
     await Bun.write(briefPath, brief);
     const pane = await ovis.startLane({
-      label: key, commandLines: remoteKickoff(key, brief, d.agentCmd, shq),
+      label: key, commandLines: remoteKickoff(key, brief, ovis.agent ?? d.agentCmd, shq),
       ...(opts.cwd ? { cwd: opts.cwd } : {}), ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
     });
     paneId = `${opts.machine}@${pane.paneId}`;
@@ -278,6 +278,7 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
   // A PC whose report file could not be read this tick is not asked again until the next one: its lanes are
   // neither declared lost (a READY may still sit in that file) nor each made to wait out the request timeout.
   const unreachable = new Set<string>();
+  const applyFailed = new Set<string>();
   for (const lane of d.store.lanes()) {
     if (!lane.machine || (lane.status !== "working" && lane.status !== "waiting")) continue;
     if (unreachable.has(lane.machine)) {
@@ -295,6 +296,7 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
     try {
       events.push(...(await applyRemoteReports(d, lane.key, text)));
     } catch (e) {
+      applyFailed.add(lane.key);
       // a failure on this side (the lead's pane, the lane's own pane) is this lane's, never its PC's
       events.push({ lane: lane.key, action: "apply-failed", detail: failureDetail(e) });
     }
@@ -319,6 +321,18 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
     try {
       const st = await paneStatus(d, lane.paneId);
       const now = d.now();
+      if (st === "gone" && lane.machine) {
+        // its report file outlives the pane: what it says is taken before the lane is called lost, and a lane
+        // whose entries could not be applied this tick is left for the next one
+        if (applyFailed.has(lane.key)) {
+          events.push({ lane: lane.key, action: "lane-failed", detail: "pane gone, report file not applied yet" });
+          continue;
+        }
+        events.push(...(await applyRemoteReports(d, lane.key, await d.machine(lane.machine).readFile(remoteReportPath(lane.key)))));
+        const after = d.store.lane(lane.key)!;
+        if (after.status !== "working" && after.status !== "waiting") continue;
+        Object.assign(lane, after);
+      }
       if (st === "gone") {
         lane.status = "lost";
         lane.log.push({ at: now, kind: "lost", text: "pane disappeared without READY" });
@@ -373,12 +387,16 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
 export async function applyRemoteReports(d: Deps, key: string, text: string | null): Promise<DutyEvent[]> {
   if (text === null) return [];
   const events: DutyEvent[] = [];
-  for (const entry of parseRemoteReports(text).slice(d.store.lane(key)!.remoteEntries ?? 0)) {
+  const entries = parseRemoteReports(text);
+  for (let at = d.store.lane(key)!.remoteEntries ?? 0; at < entries.length; at++) {
+    const entry = entries[at]!;
     const before = d.store.lane(key)!;
     if (before.status !== "working" && before.status !== "waiting") break;
+    // the position is set, never added to: two duty passes applying the same entry leave it the same
+    if ((before.remoteEntries ?? 0) > at) continue;
     const count = () => {
       const lane = d.store.lane(key)!;
-      lane.remoteEntries = (lane.remoteEntries ?? 0) + 1;
+      lane.remoteEntries = Math.max(lane.remoteEntries ?? 0, at + 1);
       d.store.saveLane(lane);
     };
     if (entry.kind === "ready" && (entry.evidence.length === 0 || !entry.text)) {

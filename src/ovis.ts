@@ -9,9 +9,10 @@ import type { AgentStatus, PaneRef } from "./herdr.ts";
 /**
  * One entry of `$DORI_HOME/machines.json`. `device` is a paired-device token (sent as the `ovis_device`
  * cookie), `token` the Ovis token (sent as a Bearer header). `machine` routes through the Ovis at `url`
- * to one of its remote PCs (`/api/machines/<machine>/...`); without it `url` is that PC's own Ovis.
+ * to one of its remote PCs (`/api/machines/<machine>/...`); without it `url` is that PC's own Ovis. `agent`
+ * is the command a lane runs there, when it is not this PC's DORI_AGENT_CMD.
  */
-export type MachineConfig = { readonly url: string; readonly token?: string; readonly device?: string; readonly machine?: string };
+export type MachineConfig = { readonly url: string; readonly token?: string; readonly device?: string; readonly machine?: string; readonly agent?: string };
 
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -37,7 +38,8 @@ export function loadMachines(root: string): Record<string, MachineConfig> {
     if (!MACHINE_RE.test(name)) throw new Error(`machines.json: machine name ${JSON.stringify(name)} must match ${MACHINE_RE}`);
     if (typeof c.url !== "string" || !/^https?:\/\//.test(c.url)) throw new Error(`machines.json: ${name}.url must be an http(s) URL`);
     if (typeof c.token !== "string" && typeof c.device !== "string") throw new Error(`machines.json: ${name} needs a token or a device token`);
-    out[name] = { url: c.url.replace(/\/+$/, ""), token: c.token, device: c.device, machine: c.machine };
+    if (c.agent !== undefined && (typeof c.agent !== "string" || !/^[A-Za-z0-9_./ =-]+$/.test(c.agent))) throw new Error(`machines.json: ${name}.agent must be a plain command line`);
+    out[name] = { url: c.url.replace(/\/+$/, ""), token: c.token, device: c.device, machine: c.machine, agent: c.agent };
   }
   return out;
 }
@@ -60,6 +62,10 @@ export class Ovis {
     /** how long a started lane's agent may take to show up in its pane, how often that is asked, and the paste settle */
     private readonly timing = { agentTimeoutMs: 60_000, agentEveryMs: 1000, settleMs: PASTE_SETTLE_MS },
   ) {}
+
+  get agent(): string | undefined {
+    return this.config.agent;
+  }
 
   private url(path: string): string {
     const m = this.config.machine;
