@@ -1,8 +1,9 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Deps } from "../src/harness.ts";
+import { Refusal, type Deps } from "../src/harness.ts";
 import { Herdr, type AgentStatus, type Exec } from "../src/herdr.ts";
+import { Ovis, type Fetch } from "../src/ovis.ts";
 import { Store, type HostLoad } from "../src/store.ts";
 import type { DutyCounts, TelemetryEvent, Usage } from "../src/telemetry.ts";
 
@@ -30,6 +31,48 @@ export class World {
     flush: async () => {},
   };
   reviewer: (argv: readonly string[]) => { code: number; stdout: string } = () => ({ code: 0, stdout: "VERDICT: CLEAR" });
+
+  /** The one remote PC, `pc`, as its Ovis answers: its panes, its files and every request it got. */
+  remote = new Map<string, Pane & { label?: string; cwd?: string }>();
+  remoteFiles = new Map<string, string>();
+  ovisCalls: { method: string; path: string; headers: Record<string, string>; body?: Record<string, unknown> }[] = [];
+  /** set: the command typed into a created pane brings up no agent */
+  remoteAgentFails = false;
+  /** set: the PC cannot be reached at all */
+  remoteDown = false;
+
+  ovisFetch: Fetch = async (url, init) => {
+    if (this.remoteDown) throw new TypeError("fetch failed: connection refused");
+    const u = new URL(url);
+    const path = u.pathname.replace(/^\/api\//, "");
+    const body = init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+    this.ovisCalls.push({ method: String(init.method), path, headers: { ...(init.headers as Record<string, string>) }, ...(body ? { body } : {}) });
+    const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
+    if (path === "workspace/create" || path === "tab/create") {
+      const id = `w9:p${++this.next}`;
+      this.remote.set(id, { status: "shell", received: [], ran: [], label: String(body!.label), ...(body!.cwd ? { cwd: String(body!.cwd) } : {}) });
+      return json({ workspace_id: "w9", pane_id: id, agent_started: false });
+    }
+    if (path === "session") {
+      return json({ snapshot: { panes: [...this.remote].map(([pane_id, p]) => ({ pane_id, agent: p.status === "shell" ? null : "omo", agent_status: p.status })) } });
+    }
+    if (path === "fs/file") {
+      const file = this.remoteFiles.get(u.searchParams.get("path") ?? "");
+      return file === undefined ? json({ error: { code: "not_found", message: "no readable file at that path" } }, 404) : new Response(file);
+    }
+    const id = String(body?.["pane_id"] ?? u.searchParams.get("pane_id"));
+    const pane = this.remote.get(id);
+    if (!pane) return json({ error: { code: "pane_not_found", message: id } }, 404);
+    if (path === "pane/input") { pane.received.push(String(body!.text)); return json({ ok: true }); }
+    if (path === "pane/keys") {
+      pane.ran.push((body!.keys as string[]).join(" "));
+      if (pane.status === "shell" && !this.remoteAgentFails && pane.received.at(-1)?.includes(" omo ")) pane.status = "idle";
+      return json({ ok: true });
+    }
+    if (path === "pane/read") return json({ read: { text: pane.screen ?? "" } });
+    if (path === "pane/close") { this.remote.delete(id); return json({ ok: true }); }
+    return json({ error: { code: "not_found", message: path } }, 404);
+  };
 
   addPane(id: string, status: AgentStatus = "idle"): Pane {
     const p = { status, received: [], ran: [] };
@@ -87,6 +130,10 @@ export class World {
       doriCmd: "dori",
       host: () => this.host,
       usage: this.recorder,
+      machine: (name) => {
+        if (name !== "pc") throw new Refusal(`no machine ${name}`);
+        return new Ovis(name, { url: "http://pc.test:7420", token: "secret" }, this.ovisFetch, { agentTimeoutMs: 50, agentEveryMs: 5, settleMs: 1 });
+      },
     };
   }
 }

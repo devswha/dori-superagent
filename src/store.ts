@@ -14,6 +14,10 @@ export type Lane = {
   createdAt: number;
   lastActivityAt: number;
   nudges: number;
+  /** set for a lane on another PC (`dori start --machine`); its paneId is `<machine>@<pane id>` */
+  machine?: string;
+  /** how many entries of the remote lane's report file the duty loop has applied */
+  remoteEntries?: number;
   final?: { text: string; evidence: string[]; at: number };
   log: { at: number; kind: "start" | "report" | "ready" | "nudge" | "done" | "lost"; text: string }[];
 };

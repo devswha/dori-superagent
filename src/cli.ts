@@ -13,6 +13,7 @@ const USAGE = `dori - a proactive multi-session harness on herdr + omo
   dori up [--cwd DIR]                         open lead, duty, duty loop and hourly loop panes
   dori role <lead|duty> [PANE]                register a pane as lead or duty (default: this pane)
   dori start <key> --brief FILE [--cwd DIR]   open a lane: new tab, omo session, brief + lane rules
+             [--machine NAME]                 ...on another PC, through its Ovis ($DORI_HOME/machines.json)
   dori report <key> --text T [--status working|waiting]
   dori ready <key> --text T --evidence LINK [--evidence LINK ...]
   dori send <lead|duty|key|pane> --text T     deliver now, or queue until the pane is idle
@@ -114,7 +115,7 @@ export async function main(argv: readonly string[], d: Deps = defaultDeps()): Pr
     }
     case "start": {
       const lane = await startLane(d, need(x, "lane key"), need(one(a, "brief"), "--brief"), {
-        cwd: one(a, "cwd"), workspace: one(a, "workspace"),
+        cwd: one(a, "cwd"), workspace: one(a, "workspace"), machine: one(a, "machine"),
       });
       console.log(`STARTED ${lane.key} pane=${lane.paneId} brief=${lane.brief}`);
       return 0;

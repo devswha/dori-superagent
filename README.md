@@ -71,6 +71,8 @@ State is JSON on disk under `~/.dori` (or `$DORI_HOME`): `lanes/`, `inbox/`, `br
 
 `dori start <key> --brief FILE` writes the brief plus the lane rules to `~/.dori/briefs/<key>.md`, opens a tab, runs `omo 'Read your brief at <path> and execute it. Your lane key is <key>.'`, records the lane as `working`, and sends the lead `[START <key>]`. From there the lane reports (`[REPORT <key>]`, or `[REPORT <key> WAITING]` when it is blocked outside its own pane) and ends with `[READY <key>]` plus its evidence links. The lead checks the evidence, runs `dori review` and `dori merge` when there is a PR, and closes the lane with `dori done <key>`. A lane that stays idle gets a nudge at 10 and 20 minutes and is escalated to the lead at 40 (`[ESCALATE <key>]`). A lane whose pane disappears before READY is reported as `[LOST <key>]`.
 
+`dori start <key> --brief FILE --machine <name>` opens the lane on another PC through its Ovis instead; see [docs/remote-lanes.md](docs/remote-lanes.md).
+
 ## Mapping to DeepSeek's super-agent
 
 | DeepSeek super-agent | dori | In this repo |
