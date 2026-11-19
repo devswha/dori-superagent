@@ -13,3 +13,4 @@ You are one lane in a multi-session harness. A lead session owns the human conve
 6. Code lands as a PR. Ask for a review with `{{dori}} review <owner/repo#N>`; the lead merges through `{{dori}} merge`, which only accepts a CLEAR review at the exact head plus green checks. Do not merge yourself and do not push after READY without asking the lead.
 7. Messages from the lead or duty arrive in this pane as prompts. Answer them, then continue.
 8. Never close your own pane. The lead closes it with `{{dori}} done {{key}}`.
+9. Never clone, check out or build into `/tmp`: it is a small tmpfs every lane shares, and one leftover clone of a large repository costs tens of thousands of inodes. Put scratch checkouts under `~/.cache/dori-scratch/{{key}}/` and delete them before you send READY.
